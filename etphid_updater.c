@@ -210,9 +210,9 @@ static int scan_i2c()
 {
     DIR* FD;
     struct dirent* in_file;
-    int res;
-    struct hidraw_devinfo info;
-    int tmp_fd;
+    //int res;
+    //struct hidraw_devinfo info;
+    //int tmp_fd;
 
     if (NULL == (FD = opendir ((char*)LINUX_DEV_PATH)))  {
         printf("scan_i2c : Open %s Error \n",(char*)LINUX_DEV_PATH);
@@ -647,12 +647,13 @@ static int elan_get_module_id()
 #define ETP_FW_IAP_LAST_FIT		(1 << 9)
 #define ETP_FW_IAP_CHECK_PW		(1 << 7)
 static uint8_t ic_type = 0;
-
+/*
 static int elan_in_main_mode(void)
 {
 	elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
 	return le_bytes_to_int(rx_buf) & ETP_I2C_MAIN_MODE_ON;
 }
+*/
 static int elan_get_iap_ctrl(void)
 {
 	elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
@@ -840,9 +841,15 @@ static int get_current_version()
 	init_elan_tp();
 	fw_version = elan_get_version(0);
 	if((fw_version==ETP_I2C_FW_VERSION_CMD)||(fw_version==0xFFFF))
+	{	
 		printf("-1\n");
+		return -1;
+	}
 	else
+	{
 		printf("%x\n", fw_version);
+		return fw_version;
+	}
 	
 }
 
