@@ -1,7 +1,7 @@
 # etphidiap
-Elan Touchpad FW Update For B50
+Elan Touchpad Firmware Update (HID Interface) For B50
 ---
-    Get ELAN TP fw version & Update Fw.
+    Get ELAN TouchPad firmware version & Update Firmware.
 
 Compilation
 --- 
@@ -11,8 +11,8 @@ Compilation
    
 Run
 ---
-Get FW Version :
+Get Firmware Version :
   ./etphid_updater -g
   
-Update FW : 
+Update Firmware : 
   ./etphid_updater -b {bin_file}
