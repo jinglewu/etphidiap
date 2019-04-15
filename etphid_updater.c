@@ -736,7 +736,8 @@ static void elan_prepare_for_update(void)
 static uint16_t elan_calc_checksum(uint8_t *data, int length)
 {
 	uint16_t checksum = 0;
-	for (int i = 0; i < length; i += 2)
+	int i;
+	for (i = 0; i < length; i += 2)
 		checksum += ((uint16_t)(data[i+1]) << 8) | (data[i]);
 	return checksum;
 }
@@ -810,9 +811,9 @@ static int elan_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 static uint16_t elan_update_firmware(void)
 {
 	uint16_t checksum = 0, block_checksum;
-	int rv;
+	int rv, i;
 
-	for (int i = elan_get_iap_addr(); i < fw_size; i += FW_PAGE_SIZE) {
+	for (i = elan_get_iap_addr(); i < fw_size; i += FW_PAGE_SIZE) {
 		block_checksum = elan_calc_checksum(fw_data + i, FW_PAGE_SIZE);
 		rv = elan_write_fw_block(fw_data + i, block_checksum);
 		checksum += block_checksum;
