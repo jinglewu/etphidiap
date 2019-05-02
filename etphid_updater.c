@@ -35,7 +35,7 @@
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
-static uint16_t module_id = 0x00bd;		/* B50 Module ID */
+//static uint16_t module_id = 0x00bd;		/* B50 Module ID */
 		
 static int hidraw_num = INITIAL_VALUE;	
 static int i2c_num = INITIAL_VALUE;		
@@ -59,15 +59,17 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:v:p:i:h:gd";
+static char *short_opts = ":b:v:p:i:h:gdmw";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
 	{"vid",      1,   NULL, 'v'},
 	{"pid",      1,   NULL, 'p'},
-	{"hidraw",   1,   NULL, 'n'},
+	{"hidraw",   1,   NULL, 'h'},
 	{"i2cnum",   1,   NULL, 'i'},
 	{"get_current_version",    0,   NULL, 'g'},
+	{"get_module_id",    0,   NULL, 'm'},
+	{"get_hardware_id",    0,   NULL, 'w'},
 	{"help",     0,   NULL, 'h'},
 	{"debug",    0,   NULL, 'd'},
 	{NULL,       0,   NULL, 0},
@@ -87,15 +89,19 @@ static void usage(int errs)
 	       "  -h,--hidraw INT      		/dev/hidraw num\n"
 	       "  -i,--i2cnum INT     		/dev/i2c- num\n"
 	       "  -g,--get_current_version  	Get Firmware Version\n"
+	       "  -m,--get_module_id  		Get Module ID\n"
+               "  -w,--get_hardware_id  	Get Hardward ID\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
 	       "  -?,--help               	Show this message\n"
 	       "\n", progname, firmware_binary, vid, pid);
 
 	exit(!!errs);
 }
-#define IAP_STATE  	 0
-#define GET_FWVER_STATE  1
-#define GER_BINVER_STATE 2
+#define IAP_STATE  	 	0
+#define GET_FWVER_STATE  	1
+#define GET_BINVER_STATE 	2
+#define GET_MODULEID_STATE 	3
+#define GET_HWID_STATE 		4
 static int parse_cmdline(int argc, char *argv[])
 {
 	char *e = 0;
@@ -143,6 +149,12 @@ static int parse_cmdline(int argc, char *argv[])
 			break;
 		case 'g':
 			state = GET_FWVER_STATE;
+			break;	
+		case 'm':
+			state = GET_MODULEID_STATE;
+			break;	
+		case 'w':
+			state = GET_HWID_STATE;
 			break;	
 		case 'd':
 			extended_i2c_exercise = 1;
@@ -592,6 +604,7 @@ static int elan_write_cmd(int reg, int cmd)
 #define ETP_I2C_OSM_VERSION_CMD		0x0103
 #define ETP_I2C_IAP_ICBODY_CMD          0x0110
 #define ETP_GET_MODULE_ID_CMD           0x0101
+#define ETP_GET_HARDWARE_ID_CMD		0x0100
 
 
 static int elan_get_version(int is_iap)
@@ -634,6 +647,11 @@ static int elan_get_module_id()
 {
     	elan_read_cmd(ETP_GET_MODULE_ID_CMD);
 	return le_bytes_to_int(rx_buf);
+}
+static int elan_get_hardware_id()
+{
+    	elan_read_cmd(ETP_GET_HARDWARE_ID_CMD);
+	return (int)rx_buf[0];
 }
 
 /* Update preparation */
@@ -699,8 +717,8 @@ static void elan_reset_tp(void)
 }
 static void elan_prepare_for_update(void)
 {
-	if(elan_get_module_id()!=module_id)
-		request_exit("Can't Support this module.\n");
+	//if(elan_get_module_id()!=module_id)
+	//	request_exit("Can't Support this module.\n");
 
 	int ctrl = elan_get_iap_ctrl();
 	if (ctrl < 0) {
@@ -841,6 +859,9 @@ static int get_current_version()
 {
 	init_elan_tp();
 	fw_version = elan_get_version(0);
+	printf("%x\n", fw_version);
+	return fw_version;
+	/*
 	if((fw_version==ETP_I2C_FW_VERSION_CMD)||(fw_version==0xFFFF))
 	{	
 		printf("-1\n");
@@ -851,6 +872,25 @@ static int get_current_version()
 		printf("%x\n", fw_version);
 		return fw_version;
 	}
+	*/
+	
+}
+static int get_module_id()
+{
+	int id;
+	init_elan_tp();
+	id = elan_get_module_id();
+	printf("%x\n", id);
+	return id;
+	
+}
+static int get_hardware_id()
+{
+	int id;
+	init_elan_tp();
+	id = elan_get_hardware_id();
+	printf("%x\n", id);
+	return id;
 	
 }
 
@@ -867,11 +907,23 @@ int main(int argc, char *argv[])
 	uint16_t local_checksum;
 	uint16_t remote_checksum;
 
-	if(parse_cmdline(argc, argv)==1)
+	int state=parse_cmdline(argc, argv);
+	if(state==GET_FWVER_STATE)
 	{		
 		get_current_version();
 		return 0;
 	}
+	else if(state==GET_MODULEID_STATE)
+	{		
+		get_module_id();
+		return 0;
+	}
+	else if(state==GET_HWID_STATE)
+	{		
+		get_hardware_id();
+		return 0;
+	}	
+
 
 	init_elan_tp();
 
