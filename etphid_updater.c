@@ -70,7 +70,7 @@ static const struct option long_opts[] = {
 	{"get_current_version",    0,   NULL, 'g'},
 	{"get_module_id",    0,   NULL, 'm'},
 	{"get_hardware_id",    0,   NULL, 'w'},
-	{"help",     0,   NULL, 'h'},
+	{"help",     0,   NULL, '?'},
 	{"debug",    0,   NULL, 'd'},
 	{NULL,       0,   NULL, 0},
 };
