@@ -219,7 +219,7 @@ static void request_exit(const char *format, ...)
 static int dev_fd;
 static int bus_type = -1;
 static int interface_type = -1;
-static char raw_name[255];
+static char raw_name[256];
 static int is_new_pattern=0;
 static int scan_i2c()
 {
@@ -240,7 +240,7 @@ static int scan_i2c()
             continue;
         }
 
-        char dev_name[255];
+        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(in_file->d_name)];
         sprintf(dev_name, "%s%s", (char*)LINUX_DEV_PATH,in_file->d_name);
 	if(extended_i2c_exercise)
 		printf("search i2c device name = %s\n",dev_name);
@@ -304,7 +304,7 @@ static int scan_hid(int Vid, int Pid)
             continue;
         }
 
-        char dev_name[255];
+        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(in_file->d_name)];
         sprintf(dev_name, "%s%s", (char*)LINUX_DEV_PATH,in_file->d_name);
 
 
@@ -313,7 +313,7 @@ static int scan_hid(int Vid, int Pid)
         }
 
         /* Get Raw Name */
-        res = ioctl(tmp_fd, HIDIOCGRAWNAME(256), raw_name);
+        res = ioctl(tmp_fd, HIDIOCGRAWNAME(sizeof(raw_name)), raw_name);
         /*if (res < 0)
             //elan_log->WriteLine((char*)"Error: HIDIOCGRAWNAME");
         else*/
@@ -350,9 +350,9 @@ static int scan_hid(int Vid, int Pid)
 }
 static int assign_hidraw()
 {
-        char dev_name[255];
-        sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
-			(char*)HID_RAW_NAME, hidraw_num);
+        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(HID_RAW_NAME) + 20];
+         sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
+ 			(char*)HID_RAW_NAME, hidraw_num);
 	//printf("dev_name = %s\n", dev_name);
 	if ((dev_fd = open(dev_name, O_RDWR|O_NONBLOCK)) < 0) {
 	    request_exit("Can't open hidraw%d.\n", hidraw_num);
@@ -365,9 +365,9 @@ static int assign_hidraw()
 }
 static int assign_i2c()
 {
-	char dev_name[255];
-        sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
-			(char*)I2C_NAME, i2c_num);
+	char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(I2C_NAME) + 20];
+         sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
+ 			(char*)I2C_NAME, i2c_num);
 
 	if ((dev_fd = open(dev_name, O_RDWR)) < 0) {
             printf("Failed to open the i2c bus.");
@@ -808,12 +808,12 @@ static void elan_prepare_for_update(void)
 
 			elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_page_size / 2);
 			int iap_type = elan_get_iap_type();
-			if((iap_type & 0xFFFF)!= (fw_page_size / 2)& 0xFFFF)
+			if((iap_type & 0xFFFF)!= ((fw_page_size / 2)& 0xFFFF))
             		{
               
                 		elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_page_size / 2);
 				iap_type = elan_get_iap_type();
-                		if((iap_type & 0xFFFF)!=(fw_page_size / 2)& 0xFFFF)
+                		if((iap_type & 0xFFFF)!=((fw_page_size / 2)& 0xFFFF))
                 		{
 					request_exit("Read/Wirte IAP Type Command FAIL!!\n");
                 		}
