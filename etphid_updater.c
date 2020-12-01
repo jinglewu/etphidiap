@@ -61,7 +61,7 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:v:p:i:h:gdm";
+static char *short_opts = ":b:v:p:i:h:gdmw";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
@@ -71,6 +71,7 @@ static const struct option long_opts[] = {
 	{"i2cnum",   1,   NULL, 'i'},
 	{"get_current_version",    0,   NULL, 'g'},
 	{"get_module_id",    0,   NULL, 'm'},
+	{"get_hardware_id",    0,   NULL, 'w'},
 	{"help",     0,   NULL, '?'},
 	{"debug",    0,   NULL, 'd'},
 	{NULL,       0,   NULL, 0},
@@ -91,6 +92,7 @@ static void usage(int errs)
 	       "  -i,--i2cnum INT     		/dev/i2c- num\n"
 	       "  -g,--get_current_version  	Get Firmware Version\n"
 	       "  -m,--get_module_id  		Get Module ID\n"
+	       "  -w,--get_hardware_id  	Get Hardward ID\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
 	       "  -?,--help               	Show this message\n"
 	       "\n", progname, firmware_binary, vid, pid);
@@ -101,6 +103,7 @@ static void usage(int errs)
 #define GET_FWVER_STATE  	1
 #define GET_BINVER_STATE 	2
 #define GET_MODULEID_STATE 	3
+#define GET_HWID_STATE 		4
 
 static int parse_cmdline(int argc, char *argv[])
 {
@@ -152,6 +155,9 @@ static int parse_cmdline(int argc, char *argv[])
 			break;	
 		case 'm':
 			state = GET_MODULEID_STATE;
+			break;
+		case 'w':
+			state = GET_HWID_STATE;
 			break;
 		case 'd':
 			extended_i2c_exercise = 1;
@@ -668,6 +674,11 @@ static int elan_get_module_id()
 	return le_bytes_to_int(rx_buf);
 }
 
+static int elan_get_hardware_id()
+{
+    	elan_read_cmd(ETP_GET_HARDWARE_ID_CMD);
+	return (int)rx_buf[0];
+}
 /* Update preparation */
 #define ETP_I2C_IAP_RESET_CMD		0x0314
 #define ETP_I2C_IAP_RESET		0xF0F0
@@ -975,6 +986,15 @@ static int get_module_id()
 	
 }
 
+static int get_hardware_id()
+{
+	int id;
+	init_elan_tp();
+	id = elan_get_hardware_id();
+	printf("%x\n", id);
+	return id;
+
+}
 
 #define ETP_I2C_ENABLE_REPORT       0x0800
 static void switch_to_ptpmode()
@@ -1000,6 +1020,11 @@ int main(int argc, char *argv[])
 	else if(state==GET_MODULEID_STATE)
 	{		
 		get_module_id();
+		return 0;
+	}
+	else if(state==GET_HWID_STATE)
+	{		
+		get_hardware_id();
 		return 0;
 	}
 	
