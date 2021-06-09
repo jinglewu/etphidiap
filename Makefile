@@ -1,7 +1,7 @@
 #elan touchpad updater Makefile
 CC ?= gcc
 
-CFLAGS += -Wall -Werror
+CFLAGS += -g -Wall -fexceptions
 
 main: etphid_updater.o 
 	${CC} ${CFLAGS} ${LDFLAGS} etphid_updater.o -o etphid_updater
