@@ -32,27 +32,37 @@
 #define HID_INTERFACE 1
 #define I2C_INTERFACE 2
 
+#define VERSION "1.6"
+#define VERSION_SUB "1"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
-//static uint16_t module_id = 0x00bd;		/* B50 Module ID */
+static uint16_t i2caddr = 0x15;			
+//static uint16_t module_id = 0x0;	
 		
 static int hidraw_num = INITIAL_VALUE;	
 static int i2c_num = INITIAL_VALUE;		
 static uint8_t extended_i2c_exercise;		/* non-zero to exercise */
 static char *firmware_binary = "elan_i2c.bin";	/* firmware blob */
 
+#define ETP_I2C_IAP_CTRL_CMD		0x0310
+
 /* Firmware binary blob related */
 #define FW_PAGE_SIZE			64
 #define MAX_FW_PAGE_COUNT		2048
 #define MAX_FW_SIZE			(MAX_FW_PAGE_COUNT*FW_PAGE_SIZE)
+#define FW_SIGNATURE_SIZE	6
 
 static uint8_t fw_data[MAX_FW_SIZE];
 int fw_page_count;
 int fw_size;
 static int fw_page_size;
+static int fw_section_size;
+static int fw_section_cnt;
+static int fw_no_of_sections;
 static int iap_version = -1;
 static int fw_version = -1;
+static int fw_signature_address;
 /* Utility functions */
 static int le_bytes_to_int(uint8_t *buf)
 {
@@ -61,7 +71,7 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:v:p:i:h:gdmw";
+static char *short_opts = ":b:v:p:i:h:gdmza:";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
@@ -69,10 +79,11 @@ static const struct option long_opts[] = {
 	{"pid",      1,   NULL, 'p'},
 	{"hidraw",   1,   NULL, 'h'},
 	{"i2cnum",   1,   NULL, 'i'},
+	{"i2caddr",   1,   NULL, 'a'},
 	{"get_current_version",    0,   NULL, 'g'},
 	{"get_module_id",    0,   NULL, 'm'},
-	{"get_hardware_id",    0,   NULL, 'w'},
 	{"help",     0,   NULL, '?'},
+	{"version",    0,   NULL, 'z'},
 	{"debug",    0,   NULL, 'd'},
 	{NULL,       0,   NULL, 0},
 };
@@ -85,17 +96,18 @@ static void usage(int errs)
 	       "\n"
 	       "Options:\n"
 	       "\n"
-	       "  -b,--bin    STR          	Firmware binary (default %s)\n"
-	       "  -v,--vid    HEXVAL      	Vendor ID (default %04x)\n"
-	       "  -p,--pid    HEXVAL      	Product ID (default %04x)\n"
-	       "  -h,--hidraw INT      		/dev/hidraw num\n"
-	       "  -i,--i2cnum INT     		/dev/i2c- num\n"
+	       "  -b,--bin     STR          	Firmware binary (default %s)\n"
+	       "  -v,--vid     HEXVAL      	Vendor ID (default %04x)\n"
+	       "  -p,--pid     HEXVAL      	Product ID (default %04x)\n"
+	       "  -h,--hidraw  INT     		/dev/hidraw num\n"
+	       "  -i,--i2cnum  INT     		/dev/i2c- num\n"
+	       "  -a,--i2caddr HEXVAL     	i2c address (default 0x02x)\n"
 	       "  -g,--get_current_version  	Get Firmware Version\n"
 	       "  -m,--get_module_id  		Get Module ID\n"
-	       "  -w,--get_hardware_id  	Get Hardward ID\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
+	       "  -z,--version              	Version\n"	
 	       "  -?,--help               	Show this message\n"
-	       "\n", progname, firmware_binary, vid, pid);
+	       "\n", progname, firmware_binary, vid, pid, i2caddr);
 
 	exit(!!errs);
 }
@@ -103,7 +115,7 @@ static void usage(int errs)
 #define GET_FWVER_STATE  	1
 #define GET_BINVER_STATE 	2
 #define GET_MODULEID_STATE 	3
-#define GET_HWID_STATE 		4
+#define GET_SWVER_STATE		4
 
 static int parse_cmdline(int argc, char *argv[])
 {
@@ -150,14 +162,18 @@ static int parse_cmdline(int argc, char *argv[])
 				errorcnt++;
 			}
 			break;
+		case 'a':
+			i2caddr  = (int) strtoul(optarg, &e, 16);
+			if (!*optarg || (e && *e)) {
+				printf("Invalid argument: \"%s\"\n", optarg);
+				errorcnt++;
+			}
+			break;
 		case 'g':
 			state = GET_FWVER_STATE;
 			break;	
 		case 'm':
 			state = GET_MODULEID_STATE;
-			break;
-		case 'w':
-			state = GET_HWID_STATE;
 			break;
 		case 'd':
 			extended_i2c_exercise = 1;
@@ -166,6 +182,9 @@ static int parse_cmdline(int argc, char *argv[])
 			usage(errorcnt);
 			break;*/
 		case 0:				/* auto-handled option */
+			break;
+		case 'z':			
+			state = GET_SWVER_STATE;
 			break;
 		case '?':
 			if (optopt)
@@ -219,8 +238,9 @@ static void request_exit(const char *format, ...)
 static int dev_fd;
 static int bus_type = -1;
 static int interface_type = -1;
-static char raw_name[256];
+static char raw_name[255];
 static int is_new_pattern=0;
+static int elan_read_cmd(int reg);
 static int scan_i2c()
 {
     DIR* FD;
@@ -240,7 +260,7 @@ static int scan_i2c()
             continue;
         }
 
-        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(in_file->d_name)];
+        char dev_name[255];
         sprintf(dev_name, "%s%s", (char*)LINUX_DEV_PATH,in_file->d_name);
 	if(extended_i2c_exercise)
 		printf("search i2c device name = %s\n",dev_name);
@@ -252,7 +272,7 @@ static int scan_i2c()
             continue;
         }
 
-        int addr = 0x15 ;
+        int addr = i2caddr ;
         if (ioctl(dev_fd, I2C_SLAVE, addr) < 0) {
 
             if (ioctl(dev_fd, I2C_SLAVE_FORCE, addr) >= 0)
@@ -304,7 +324,7 @@ static int scan_hid(int Vid, int Pid)
             continue;
         }
 
-        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(in_file->d_name)];
+        char dev_name[255];
         sprintf(dev_name, "%s%s", (char*)LINUX_DEV_PATH,in_file->d_name);
 
 
@@ -313,7 +333,7 @@ static int scan_hid(int Vid, int Pid)
         }
 
         /* Get Raw Name */
-        res = ioctl(tmp_fd, HIDIOCGRAWNAME(sizeof(raw_name)), raw_name);
+        res = ioctl(tmp_fd, HIDIOCGRAWNAME(256), raw_name);
         /*if (res < 0)
             //elan_log->WriteLine((char*)"Error: HIDIOCGRAWNAME");
         else*/
@@ -332,13 +352,15 @@ static int scan_hid(int Vid, int Pid)
 	            if (extended_i2c_exercise) {
                     	printf("HID Raw Info\n");
 			printf("Raw name: %s\n", raw_name);
-                    	//printf("Bus type: %d\n", bus_type);
+                    	printf("Bus type: %d\n", bus_type);
                     	//printf("VID: %x\n", vid);
                     	//printf("PID: %x\n", pid);
 		    }
 		    dev_fd = tmp_fd;
 		    interface_type = HID_INTERFACE;
-                    return 1;
+
+		    if(elan_read_cmd(ETP_I2C_IAP_CTRL_CMD)>=0)
+                    	return 1;
                 }
             }
 
@@ -350,9 +372,9 @@ static int scan_hid(int Vid, int Pid)
 }
 static int assign_hidraw()
 {
-        char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(HID_RAW_NAME) + 20];
-         sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
- 			(char*)HID_RAW_NAME, hidraw_num);
+        char dev_name[255];
+        sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
+			(char*)HID_RAW_NAME, hidraw_num);
 	//printf("dev_name = %s\n", dev_name);
 	if ((dev_fd = open(dev_name, O_RDWR|O_NONBLOCK)) < 0) {
 	    request_exit("Can't open hidraw%d.\n", hidraw_num);
@@ -365,16 +387,16 @@ static int assign_hidraw()
 }
 static int assign_i2c()
 {
-	char dev_name[sizeof(LINUX_DEV_PATH) + sizeof(I2C_NAME) + 20];
-         sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
- 			(char*)I2C_NAME, i2c_num);
+	char dev_name[255];
+        sprintf(dev_name, "%s%s%d", (char*)LINUX_DEV_PATH, 
+			(char*)I2C_NAME, i2c_num);
 
 	if ((dev_fd = open(dev_name, O_RDWR)) < 0) {
             printf("Failed to open the i2c bus.");
             close(dev_fd);
             return -1;
         }
-	int addr = 0x15 ;
+	int addr = i2caddr ;
         if (ioctl(dev_fd, I2C_SLAVE, addr) < 0) {
 
             if (ioctl(dev_fd, I2C_SLAVE_FORCE, addr) >= 0)
@@ -674,15 +696,10 @@ static int elan_get_module_id()
 	return le_bytes_to_int(rx_buf);
 }
 
-static int elan_get_hardware_id()
-{
-    	elan_read_cmd(ETP_GET_HARDWARE_ID_CMD);
-	return (int)rx_buf[0];
-}
 /* Update preparation */
 #define ETP_I2C_IAP_RESET_CMD		0x0314
 #define ETP_I2C_IAP_RESET		0xF0F0
-#define ETP_I2C_IAP_CTRL_CMD		0x0310
+
 #define ETP_I2C_MAIN_MODE_ON		(1 << 9)
 #define ETP_I2C_IAP_CMD			0x0311
 #define ETP_I2C_IAP_PASSWORD		0x1EA5
@@ -775,9 +792,28 @@ static int elan_get_iap_type()
     	elan_read_cmd(ETP_I2C_IAP_TYPE_CMD);
 	return le_bytes_to_int(rx_buf);
 }
+
+#define ETP_I2C_DISABLE_REPORT      0x0801
+#define ETP_I2C_ENABLE_REPORT       0x0800
+static void switch_to_ptpmode()
+{
+	if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_ENABLE_REPORT))
+		printf("Can't enable TP report\n");
+	if(elan_write_cmd(0x0306, 0x003))
+		printf("Can't switch to TP PTP mode\n");
+}
+
+static void disable_report()
+{
+	if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_DISABLE_REPORT))
+		printf("Can't disable TP report\n");
+	usleep(20 * 1000);
+
+}
+
 static void elan_prepare_for_update(void)
 {
-	//if(elan_get_module_id()!=module_id)
+	//if((elan_get_module_id()!=module_id) && (ic_type==0x13))
 	//	request_exit("Can't Support this module.\n");
 
 	int ctrl = elan_get_iap_ctrl();
@@ -794,6 +830,8 @@ static void elan_prepare_for_update(void)
 	
 
 	fw_page_size = 64; 
+	fw_section_size = 64;
+	fw_no_of_sections = 1;
     	if(ic_type>=0x10)
     	{
         	if(iap_version>=1)
@@ -802,27 +840,40 @@ static void elan_prepare_for_update(void)
             		if((iap_version>=2)&&((ic_type==0x14)||(ic_type==0x15)))
             		{
                 		fw_page_size = 512;
+				if(iap_version>=3)
+				{
+					fw_section_size = elan_get_iap_type() * 2;
+					fw_no_of_sections = fw_page_size / fw_section_size;
+				}
+				else
+					fw_section_size = 512;
             		}
             		else
+			{
                 		fw_page_size = 128; 
-
-			elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_page_size / 2);
-			int iap_type = elan_get_iap_type();
-			if((iap_type & 0xFFFF)!= ((fw_page_size / 2)& 0xFFFF))
-            		{
-              
-                		elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_page_size / 2);
-				iap_type = elan_get_iap_type();
-                		if((iap_type & 0xFFFF)!=((fw_page_size / 2)& 0xFFFF))
-                		{
-					request_exit("Read/Wirte IAP Type Command FAIL!!\n");
-                		}
-            		}
+				fw_section_size = 128;
+			}
+			if(fw_section_size == fw_page_size) {
+				elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_section_size / 2);
+				int iap_type = elan_get_iap_type();
+				if((iap_type & 0xFFFF)!= (fw_section_size / 2)& 0xFFFF)
+		    		{
+		      
+		        		elan_write_cmd(ETP_I2C_IAP_TYPE_CMD, fw_section_size / 2);
+					iap_type = elan_get_iap_type();
+		        		if((iap_type & 0xFFFF)!=(fw_section_size / 2)& 0xFFFF)
+		        		{
+						request_exit("Read/Wirte IAP Type Command FAIL!!\n");
+		        		}
+		    		}
+			}
 
 
         	}
 	}
-    	printf("FW Page Size = %d\n", fw_page_size);
+    	//printf("FW Page Size = %d\n", fw_page_size);
+	//printf("FW Section Size = %d\n", fw_section_size);
+	//printf("FW Section No = %d\n", fw_no_of_sections);
 	if((ic_type & 0xFF) == 0x0A)
         	elan_write_cmd(ETP_I2C_IAP_CMD, ETP_I2C_IAP_0A_PASSWORD);
     	else
@@ -867,61 +918,75 @@ static int elan_get_iap_addr(void)
 
 static int i2c_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 {
-    	unsigned char page_store[fw_page_size + 4];
+    	unsigned char page_store[fw_section_size + 4];
     	int rv;
     	page_store[0] = ETP_I2C_IAP_REG_L;
     	page_store[1] = ETP_I2C_IAP_REG_H;
-    	memcpy(page_store + 2, raw_data, fw_page_size);
-    	page_store[fw_page_size + 2 + 0] = (checksum >> 0) & 0xff;
-    	page_store[fw_page_size + 2 + 1] = (checksum >> 8) & 0xff;
+    	memcpy(page_store + 2, raw_data, fw_section_size);
+    	page_store[fw_section_size + 2 + 0] = (checksum >> 0) & 0xff;
+    	page_store[fw_section_size + 2 + 1] = (checksum >> 8) & 0xff;
 	
 	rv = i2c_send_cmd(
 			page_store, sizeof(page_store), 0, 0);
 	if (rv)
 		return rv;
 
-	if(fw_page_size==512)
-        	usleep(50 *1000);
-    	else
-        	usleep(35 * 1000);
-
-	elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
-	rv = le_bytes_to_int(rx_buf);
-	if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
-		printf("IAP reports failed write : %x\n", rv);
-		return rv;
+	if((fw_section_size == fw_page_size) || (fw_section_cnt == fw_no_of_sections))
+	{
+		if(fw_page_size == 512)
+			usleep(50 *1000);
+	    	else
+			usleep(35 * 1000);
+		
+		elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
+		rv = le_bytes_to_int(rx_buf);
+		fw_section_cnt = 0;
+		if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
+			printf("IAP reports failed write : %x\n", rv);
+			fw_section_cnt++;
+			return rv;
+		}
 	}
+	fw_section_cnt++;
 	return 0;
 }
 static int hid_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 {
-	uint8_t page_store[fw_page_size + 3];
+	uint8_t page_store[fw_section_size + 3];
 	int rv;
 	page_store[0] = 0x0B;   //Report ID
-    	memcpy(page_store + 1, raw_data, fw_page_size);
-    	page_store[fw_page_size + 1 + 0] = (checksum >> 0) & 0xff;
-    	page_store[fw_page_size + 1 + 1] = (checksum >> 8) & 0xff;
+    	memcpy(page_store + 1, raw_data, fw_section_size);
+    	page_store[fw_section_size + 1 + 0] = (checksum >> 0) & 0xff;
+    	page_store[fw_section_size + 1 + 1] = (checksum >> 8) & 0xff;
 	
 	rv = hid_send_cmd(
 			page_store, sizeof(page_store), 0, 0);
 	if (rv)
 		return rv;
 
-	if(fw_page_size==512)
-        	usleep(50 *1000);
-    	else
-        	usleep(35 * 1000);
+	if((fw_section_size == fw_page_size) || (fw_section_cnt == fw_no_of_sections))
+	{
+		if(fw_page_size == 512)
+			usleep(50 *1000);
+	    	else
+			usleep(35 * 1000);
 
-	elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
-	rv = le_bytes_to_int(rx_buf);
-	if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
-		printf("IAP reports failed write : %x\n", rv);
-		return rv;
+		elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
+		rv = le_bytes_to_int(rx_buf);
+
+		fw_section_cnt = 0;
+		if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
+			printf("IAP reports failed write : %x\n", rv);
+			fw_section_cnt++;
+			return rv;
+		}
+		
 	}
+	fw_section_cnt++;
 	return 0;
 }
 
-static int elan_write_fw_block(uint8_t *raw_data, uint16_t checksum)
+static int _elan_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 {
 	if (interface_type==HID_INTERFACE)
 		return hid_write_fw_block(raw_data, checksum);
@@ -929,17 +994,31 @@ static int elan_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 		return i2c_write_fw_block(raw_data, checksum);
 }
 
+static int elan_write_fw_block(uint8_t *raw_data, uint16_t checksum)
+{	
+	int rv;
+	for(int i=0; i<10 ; i++) {
+		rv = _elan_write_fw_block(raw_data, checksum);
+		if(rv==0)
+			return 0;
+		printf("Retry(%d)..\n", i);
+		usleep(50);
+	}
+	return rv;
+}
+
 static uint16_t elan_update_firmware(void)
 {
 	uint16_t checksum = 0, block_checksum;
 	int rv, i;
 
-	for (i = elan_get_iap_addr(); i < fw_size; i += fw_page_size) {
-		block_checksum = elan_calc_checksum(fw_data + i, fw_page_size);
+	fw_section_cnt = 1;
+	for (i = elan_get_iap_addr(); i < fw_size; i += fw_section_size) {
+		block_checksum = elan_calc_checksum(fw_data + i, fw_section_size);
 		rv = elan_write_fw_block(fw_data + i, block_checksum);
 		checksum += block_checksum;
-		printf("\rPage %3d is updated, checksum: %d",
-			i / fw_page_size, checksum);
+		printf("\rPage %3d is updated, checksum: %d, section: %d",
+			i / fw_page_size, checksum, fw_section_cnt);
 		fflush(stdout);
 		if (rv)
 			request_exit("Failed to update.");
@@ -986,25 +1065,37 @@ static int get_module_id()
 	
 }
 
-static int get_hardware_id()
-{
-	int id;
-	init_elan_tp();
-	id = elan_get_hardware_id();
-	printf("%x\n", id);
-	return id;
 
-}
 
-#define ETP_I2C_ENABLE_REPORT       0x0800
-static void switch_to_ptpmode()
+/*
+static void switch_to_ptpmode(int ptpmode)
 {
 	if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_ENABLE_REPORT))
 		printf("Can't enable TP report\n");
-	if(elan_write_cmd(0x0306, 0x003))
-		printf("Can't switch to TP PTP mode\n");
-}
 
+	if(ptpmode==1)
+	{
+		if(elan_write_cmd(0x0306, 0x003))
+			printf("Can't switch to TP PTP mode\n");
+	}
+}
+*/
+
+static int check_fw_signature()
+{
+
+	static const uint8_t signature[] = {0xAA, 0x55, 0xCC, 0x33, 0xFF, 0xFF};
+	/* Firmware file must match signature data */
+	for(int i=0; i< sizeof(signature); i++)
+	{
+		if(fw_data[fw_signature_address+i]!=signature[i]) {
+			printf("signature mismatch (expected %x, got %x)\n",signature[i], fw_data[fw_signature_address+i]);
+			return -1;
+		}
+	}
+
+	return 0;
+}
 int main(int argc, char *argv[])
 {
 	uint16_t local_checksum;
@@ -1022,12 +1113,12 @@ int main(int argc, char *argv[])
 		get_module_id();
 		return 0;
 	}
-	else if(state==GET_HWID_STATE)
-	{		
-		get_hardware_id();
+	else if(state==GET_SWVER_STATE)
+	{
+		printf("Version: %s.%s\n", VERSION, VERSION_SUB);
 		return 0;
 	}
-	
+
 	init_elan_tp();
 
 	if (interface_type==HID_INTERFACE)
@@ -1040,10 +1131,13 @@ int main(int argc, char *argv[])
 	 * Judge IC type  and get page count first.
 	 * Then check the FW file.
 	 */
+	//int ptp_mode=0;
 	fw_page_count = elan_get_ic_page_count();
 	fw_size = fw_page_count * FW_PAGE_SIZE;
+	fw_signature_address = (fw_page_count * FW_PAGE_SIZE) - FW_SIGNATURE_SIZE;
 	//printf("IC page count is %04X\n", fw_page_count);
-	//printf("fw_size %d\n", fw_size);
+	//printf("fw_size %d\n", fw_size);	
+	//printf("fw_signature_address %d\n", fw_signature_address);
 	/* Read the FW file */
 	FILE *f = fopen(firmware_binary, "rb");
 	if (!f)
@@ -1054,6 +1148,11 @@ int main(int argc, char *argv[])
 	 * It is possible that you are not able to get firmware info. This
 	 * might due to an incomplete update last time
 	 */
+	if(check_fw_signature()<0)
+		return -1;
+
+	disable_report();
+
 	elan_get_fw_info();
 
 	/* Trigger an I2C transaction of expecting reading of 633 bytes. */
