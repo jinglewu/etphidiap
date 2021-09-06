@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 The Chromium OS Authors. All rights reserved.
+ * Copyright 2021 The Chromium OS Authors. All rights reserved.
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -32,8 +32,8 @@
 #define HID_INTERFACE 1
 #define I2C_INTERFACE 2
 
-#define VERSION "1.7"
-#define VERSION_SUB "1"
+#define VERSION "1.8"
+#define VERSION_SUB "2"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
@@ -56,6 +56,7 @@ static char *firmware_binary = "elan_i2c.bin";	/* firmware blob */
 static uint8_t fw_data[MAX_FW_SIZE];
 int fw_page_count;
 int fw_size;
+int fw_size_all = 0;
 static int fw_page_size;
 static int fw_section_size;
 static int fw_section_cnt;
@@ -71,7 +72,7 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:v:p:i:h:gdmza:";
+static char *short_opts = ":b:v:p:i:h:gdmzwa:";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
@@ -82,6 +83,7 @@ static const struct option long_opts[] = {
 	{"i2caddr",   1,   NULL, 'a'},
 	{"get_current_version",    0,   NULL, 'g'},
 	{"get_module_id",    0,   NULL, 'm'},
+	{"get_hardware_id",    0,   NULL, 'w'},
 	{"help",     0,   NULL, '?'},
 	{"version",    0,   NULL, 'z'},
 	{"debug",    0,   NULL, 'd'},
@@ -104,6 +106,7 @@ static void usage(int errs)
 	       "  -a,--i2caddr HEXVAL     	i2c address (default %02x)\n"
 	       "  -g,--get_current_version  	Get Firmware Version\n"
 	       "  -m,--get_module_id  		Get Module ID\n"
+	       "  -w,--get_hardware_id  	Get Hardward ID\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
 	       "  -z,--version              	Version\n"	
 	       "  -?,--help               	Show this message\n"
@@ -115,7 +118,8 @@ static void usage(int errs)
 #define GET_FWVER_STATE  	1
 #define GET_BINVER_STATE 	2
 #define GET_MODULEID_STATE 	3
-#define GET_SWVER_STATE		4
+#define GET_HWID_STATE 		4
+#define GET_SWVER_STATE		5
 
 static int parse_cmdline(int argc, char *argv[])
 {
@@ -175,6 +179,9 @@ static int parse_cmdline(int argc, char *argv[])
 		case 'm':
 			state = GET_MODULEID_STATE;
 			break;
+		case 'w':
+			state = GET_HWID_STATE;
+			break;	
 		case 'd':
 			extended_i2c_exercise = 1;
 			break;
@@ -645,7 +652,40 @@ static int elan_write_cmd(int reg, int cmd)
 #define ETP_I2C_IAP_ICBODY_CMD          0x0110
 #define ETP_GET_MODULE_ID_CMD           0x0101
 #define ETP_GET_HARDWARE_ID_CMD		0x0100
+#define ETP_I2C_FLIM_TYPE_ENABLE_CMD	0x0104
+#define ETP_BIN_FILM_TYPE_TBL_ADDR	0x0683
 
+#define ETP_FW_FLIM_TYPE_ENABLE_BIT	0x1
+
+static int elan_get_flim_type_addr()
+{
+    return le_bytes_to_int(fw_data + ETP_BIN_FILM_TYPE_TBL_ADDR * 2) * 2;
+}
+
+static int elan_get_flim_type_enable()
+{
+    	elan_read_cmd(ETP_I2C_FLIM_TYPE_ENABLE_CMD);
+
+	if (interface_type==HID_INTERFACE) {
+		if((rx_buf[0]==0x1)&&(rx_buf[1]==0x4)) {
+			printf("Get flim type enable cmd fail.\n");
+			return -1;
+		}
+	}
+	else {
+		if((rx_buf[0]==0xFF)&&(rx_buf[1]==0xFF)) {
+			printf("Get flim type enable cmd fail.\n");
+			return -1;
+		}
+	}
+	//printf("elan_get_flim_type_enable %x %x\n", rx_buf[0], rx_buf[0] & ETP_FW_FLIM_TYPE_ENABLE_BIT);
+	if(rx_buf[0] & ETP_FW_FLIM_TYPE_ENABLE_BIT) {
+		//printf("Enable flim type\n");
+		return 1;
+	}
+	else
+		return 0;
+}
 
 static int elan_get_version(int is_iap)
 {
@@ -663,6 +703,12 @@ static int elan_get_version(int is_iap)
 		return is_iap ? rx_buf[1] : val;
 	else
 		return val;
+}
+
+static int elan_get_hardware_id()
+{
+    	elan_read_cmd(ETP_GET_HARDWARE_ID_CMD);
+	return (int)rx_buf[0];
 }
 
 static int elan_get_checksum(int is_iap)
@@ -702,6 +748,7 @@ static uint16_t elan_get_fw_info(void)
 			iap_version, fw_version);
 	printf("IAP checksum: %4x, FW checksum: %4x\n",
 			iap_checksum, fw_checksum);
+
 	return fw_checksum;
 }
 
@@ -710,6 +757,7 @@ static int elan_get_module_id()
     	elan_read_cmd(ETP_GET_MODULE_ID_CMD);
 	return le_bytes_to_int(rx_buf);
 }
+
 
 /* Update preparation */
 #define ETP_I2C_IAP_RESET_CMD		0x0314
@@ -816,29 +864,66 @@ static void switch_to_ptpmode()
 	{
 		usleep(20 * 1000);
 		if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_ENABLE_REPORT))
-			printf("Can't enable TP report\n");
+			printf("Can't enable TP report.\n");
 	}
 	if(elan_write_cmd(0x0306, 0x003))
 	{
 		usleep(20 * 1000);
 		if(elan_write_cmd(0x0306, 0x003))
-			printf("Can't switch to TP PTP mode\n");
+			printf("Can't switch to TP PTP mode.\n");
 	}
 }
 
 static void disable_report()
 {
 	if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_DISABLE_REPORT))
-		printf("Can't disable TP report\n");
+		printf("Can't disable TP report.\n");
 	usleep(20 * 1000);
 
+}
+
+static int check_fw_signature()
+{
+
+	static const uint8_t signature[] = {0xAA, 0x55, 0xCC, 0x33, 0xFF, 0xFF};
+	/* Firmware file must match signature data */
+	for(int i=0; i< sizeof(signature); i++)
+	{
+		if(fw_data[fw_signature_address+i]!=signature[i]) {
+			printf("signature mismatch (expected %x, got %x)\n",signature[i], fw_data[fw_signature_address+i]);
+			return -1;
+		}
+	}
+
+	return 0;
 }
 
 static void elan_prepare_for_update(void)
 {
 	//if((elan_get_module_id()!=module_id) && (ic_type==0x13))
-	//	request_exit("Can't Support this module.\n");
+	//	request_exit("Unable to support this module.\n");
 
+	if((ic_type==0x13)||(ic_type==0x12)) {
+
+		if(elan_get_flim_type_enable()==1) {
+			if(iap_version<=2) {
+				request_exit("Unable to support this iap version.\n");
+			}
+			else if(iap_version>=3) {
+				int new_fw_size= elan_get_flim_type_addr();
+				//printf("addr = %d %x\n", new_fw_size, new_fw_size);
+				fw_size_all = fw_size;
+				fw_size = new_fw_size - 1;
+				fw_signature_address = new_fw_size - FW_SIGNATURE_SIZE;
+				if(check_fw_signature()<0)
+				{
+					switch_to_ptpmode();
+					request_exit("Firmware Signatrue FAIL.\n");
+				}
+			}
+				
+		}
+	}
 	int ctrl = elan_get_iap_ctrl();
 	if (ctrl < 0) {
 		request_exit("In IAP mode, ReadIAPControl FAIL.\n");
@@ -964,6 +1049,7 @@ static int i2c_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 		elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
 		rv = le_bytes_to_int(rx_buf);
 		fw_section_cnt = 0;
+		//printf("\nrv - %d %x\n", rv,rv);
 		if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
 			printf("IAP reports failed write : %x\n", rv);
 			fw_section_cnt++;
@@ -996,7 +1082,7 @@ static int hid_write_fw_block(uint8_t *raw_data, uint16_t checksum)
 
 		elan_read_cmd(ETP_I2C_IAP_CTRL_CMD);
 		rv = le_bytes_to_int(rx_buf);
-
+		//printf("rv - %d %x\n", rv,rv);	
 		fw_section_cnt = 0;
 		if (rv & (ETP_FW_IAP_PAGE_ERR | ETP_FW_IAP_INTF_ERR)) {
 			printf("IAP reports failed write : %x\n", rv);
@@ -1046,6 +1132,14 @@ static uint16_t elan_update_firmware(void)
 		if (rv)
 			request_exit("Failed to update.");
 	}
+
+	// For ic_type 0x12 0x13, claculate all checksum.
+	if(fw_size_all>0) {
+		for(i = fw_size+1; i< fw_size_all; i+= fw_section_size) {
+			block_checksum = elan_calc_checksum(fw_data + i, fw_section_size);
+			checksum += block_checksum;
+		}	
+	}
 	return checksum;
 }
 
@@ -1088,6 +1182,15 @@ static int get_module_id()
 	
 }
 
+static int get_hardware_id()
+{
+	int id;
+	init_elan_tp();
+	id = elan_get_hardware_id();
+	printf("%x\n", id);
+	return id;
+
+}
 
 
 /*
@@ -1104,21 +1207,7 @@ static void switch_to_ptpmode(int ptpmode)
 }
 */
 
-static int check_fw_signature()
-{
 
-	static const uint8_t signature[] = {0xAA, 0x55, 0xCC, 0x33, 0xFF, 0xFF};
-	/* Firmware file must match signature data */
-	for(int i=0; i< sizeof(signature); i++)
-	{
-		if(fw_data[fw_signature_address+i]!=signature[i]) {
-			printf("signature mismatch (expected %x, got %x)\n",signature[i], fw_data[fw_signature_address+i]);
-			return -1;
-		}
-	}
-
-	return 0;
-}
 int main(int argc, char *argv[])
 {
 	uint16_t local_checksum;
@@ -1136,6 +1225,11 @@ int main(int argc, char *argv[])
 		get_module_id();
 		return 0;
 	}
+	else if(state==GET_HWID_STATE)
+	{		
+		get_hardware_id();
+		return 0;
+	}	
 	else if(state==GET_SWVER_STATE)
 	{
 		printf("Version: %s.%s\n", VERSION, VERSION_SUB);
