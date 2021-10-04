@@ -33,7 +33,7 @@
 #define I2C_INTERFACE 2
 
 #define VERSION "1.8"
-#define VERSION_SUB "2"
+#define VERSION_SUB "4"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
@@ -276,7 +276,7 @@ static int scan_i2c()
             //perror("Failed to open the i2c bus.");
             printf("Failed to open the i2c bus (%s).\n", dev_name);
             close(dev_fd);
-            free(FD);	
+            //free(FD);	
             continue;
         }
 
@@ -830,6 +830,7 @@ static int elan_get_ic_page_count(void)
 	case 0x11:
 		return 1280;
 		break;
+	case 0x12:
 	case 0x13:
 		return 2048;
 		break;
@@ -878,7 +879,7 @@ static void disable_report()
 {
 	if(elan_write_cmd(ETP_I2C_IAP_RESET_CMD, ETP_I2C_DISABLE_REPORT))
 		printf("Can't disable TP report.\n");
-	usleep(20 * 1000);
+	usleep(50 * 1000);
 
 }
 
@@ -907,6 +908,7 @@ static void elan_prepare_for_update(void)
 
 		if(elan_get_flim_type_enable()==1) {
 			if(iap_version<=2) {
+				switch_to_ptpmode();
 				request_exit("Unable to support this iap version.\n");
 			}
 			else if(iap_version>=3) {
@@ -926,6 +928,7 @@ static void elan_prepare_for_update(void)
 	}
 	int ctrl = elan_get_iap_ctrl();
 	if (ctrl < 0) {
+		switch_to_ptpmode();
 		request_exit("In IAP mode, ReadIAPControl FAIL.\n");
 		
     	}
@@ -971,6 +974,7 @@ static void elan_prepare_for_update(void)
 					iap_type = elan_get_iap_type();
 		        		if((iap_type & 0xFFFF)!= ((fw_section_size / 2)& 0xFFFF))
 		        		{
+						switch_to_ptpmode();
 						request_exit("Read/Wirte IAP Type Command FAIL!!\n");
 		        		}
 		    		}
@@ -992,10 +996,14 @@ static void elan_prepare_for_update(void)
 	ctrl = elan_get_iap_ctrl();
 
 	if (ctrl < 0) {
+		elan_reset_tp();
+		switch_to_ptpmode();
 		request_exit("In IAP mode, ReadIAPControl FAIL.\n");
 	}
 
 	if ((ctrl & ETP_FW_IAP_CHECK_PW) == 0){
+		elan_reset_tp();
+		switch_to_ptpmode();
 		request_exit("Got an unexpected IAP password\n");
 	}
 }
@@ -1251,15 +1259,18 @@ int main(int argc, char *argv[])
 	/* Read the FW file */
 	FILE *f = fopen(firmware_binary, "rb");
 
-	if (!f)
+	if (!f) {
+		switch_to_ptpmode();
 		request_exit("Cannot find binary: %s\n", firmware_binary);
-
+	}
 	fseek (f , 0 , SEEK_END);
     	int bin_fw_size= (int)(ftell (f));
 	rewind (f);
 
-	if (fread(fw_data, 1, bin_fw_size, f) != (unsigned int)bin_fw_size)
+	if (fread(fw_data, 1, bin_fw_size, f) != (unsigned int)bin_fw_size) {
+		switch_to_ptpmode();
 		request_exit("binary size mismatch, expect %d\n", bin_fw_size);
+	}
 	/*
 	 * It is possible that you are not able to get firmware info. This
 	 * might due to an incomplete update last time
