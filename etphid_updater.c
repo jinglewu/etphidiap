@@ -33,7 +33,7 @@
 #define I2C_INTERFACE 2
 #define HID_I2C_INTERFACE 3
 
-#define VERSION "1.9"
+#define VERSION "2.0"
 #define VERSION_SUB "1"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
@@ -62,11 +62,20 @@ static int fw_section_size;
 static int fw_section_cnt;
 static int fw_no_of_sections;
 static int iap_version = -1;
+static int module_id = -1;
+static uint8_t ic_type = 0;
+static uint16_t fw_flimforce_area_checksum = 0;
+static int flimforce_addr = -1;
+static int fw_iap_version = -1;
+static int fw_module_id = -1;
+static int fw_flimforce_addr = -1;
 static int fw_version = -1;
 static int fw_signature_address;
 
 static int eeprom_driver_ic=-1;
 static int eeprom_iap_version = -1;
+
+static int skip_rule=1; 
 /* Utility functions */
 static int le_bytes_to_int(uint8_t *buf)
 {
@@ -75,7 +84,7 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:E:v:p:i:h:gdmzwa:CG";
+static char *short_opts = ":b:E:v:p:i:h:gdmzwa:CGcIs:";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
@@ -88,6 +97,8 @@ static const struct option long_opts[] = {
 	{"get_current_version",    0,   NULL, 'g'},
 	{"get_module_id",    0,   NULL, 'm'},
 	{"get_hardware_id",    0,   NULL, 'w'},
+	{"get_fw_checksum",    0,   NULL, 'c'},
+	{"get_iap_checksum",    0,   NULL, 'I'},
 	{"get_eeprom_checksum",    0,   NULL, 'C'},
 	{"get_eeprom_version",    0,   NULL, 'G'},
 	{"help",     0,   NULL, '?'},
@@ -114,6 +125,8 @@ static void usage(int errs)
 	       "  -g,--get_current_version  	Get Firmware Version\n"
 	       "  -m,--get_module_id  		Get Module ID\n"
 	       "  -w,--get_hardware_id  	Get Hardward ID\n"
+	       "  -c,--get_fw_checksum  	Get Firmware Checksum\n"
+	       "  -I,--get_iap_checksum  	Get IAP Checksum\n"
 	       "  -C,--get_eeprom_checksum  	Get EEPROM Firmware Checksum\n"
 	       "  -G,--get_eeprom_version  	Get EEPROM Firmware Version\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
@@ -130,8 +143,11 @@ static void usage(int errs)
 #define GET_HWID_STATE 		4
 #define GET_SWVER_STATE		5
 #define EEPROM_IAP_STATE	6
-#define GET_EEPROM_CHECKSUM	7
-#define GET_EEPROM_VERSION	8
+#define GET_EEPROM_CHECKSUM_STATE	7
+#define GET_EEPROM_VERSION_STATE	8
+#define GET_FW_CHECKSUM_STATE		9
+#define GET_IAP_CHECKSUM_STATE		10
+
 static int parse_cmdline(int argc, char *argv[])
 {
 	char *e = 0;
@@ -188,6 +204,13 @@ static int parse_cmdline(int argc, char *argv[])
 				errorcnt++;
 			}
 			break;
+		case 's':
+			skip_rule  = (int) strtoul(optarg, &e, 10);
+			if (!*optarg || (e && *e)) {
+				printf("Invalid argument: \"%s\"\n", optarg);
+				errorcnt++;
+			}
+			break;
 		case 'g':
 			state = GET_FWVER_STATE;
 			break;	
@@ -197,11 +220,17 @@ static int parse_cmdline(int argc, char *argv[])
 		case 'w':
 			state = GET_HWID_STATE;
 			break;	
+		case 'c':
+			state = GET_FW_CHECKSUM_STATE;
+			break;	
+		case 'I':
+			state = GET_IAP_CHECKSUM_STATE;
+			break;	
 		case 'C':
-			state = GET_EEPROM_CHECKSUM;
+			state = GET_EEPROM_CHECKSUM_STATE;
 			break;	
 		case 'G':
-			state = GET_EEPROM_VERSION;
+			state = GET_EEPROM_VERSION_STATE;
 			break;
 		case 'd':
 			extended_i2c_exercise = 1;
@@ -713,14 +742,13 @@ static int elan_write_cmd(int reg, int cmd)
 #define ETP_I2C_FLIM_TYPE_ENABLE_CMD	0x0104
 #define ETP_BIN_FILM_TYPE_TBL_ADDR	0x0683
 
+#define ETP_I2C_PASSWORD_CMD          	0x030E
+#define ETP_I2C_IC13_IAPV5_PW		0x37CA
+#define ETP_I2C_FLIMFORCE_ADDR_CMD	0x03AD
 #define ETP_FW_FLIM_TYPE_ENABLE_BIT	0x1
 #define ETP_FW_EEPROM_ENABLE_BIT	0x2
 
 
-static int elan_get_flim_type_addr()
-{
-    return le_bytes_to_int(fw_data + ETP_BIN_FILM_TYPE_TBL_ADDR * 2) * 2;
-}
 
 static int elan_get_flim_type_enable()
 {
@@ -848,7 +876,7 @@ static int elan_get_module_id()
 
 #define ETP_FW_IAP_LAST_FIT		(1 << 9)
 #define ETP_FW_IAP_CHECK_PW		(1 << 7)
-static uint8_t ic_type = 0;
+
 /*
 static int elan_in_main_mode(void)
 {
@@ -961,6 +989,89 @@ static void disable_report()
 
 }
 
+/* Firmware block update */
+#define ETP_IAP_START_ADDR		0x0083
+#define ETP_IAP_VER_ADDR		0x0082
+#define ETP_IAP_FLIMFORCE_ADDR_V5	0x0085
+
+static uint16_t elan_calc_checksum(uint8_t *data, int length)
+{
+	uint16_t checksum = 0;
+	int i;
+	for (i = 0; i < length; i += 2)
+		checksum += ((uint16_t)(data[i+1]) << 8) | (data[i]);
+	return checksum;
+}
+static uint16_t elan_eeprom_calc_checksum(uint8_t *data, int length)
+{
+	uint16_t checksum = 0;
+	for (int i = 0; i < length; i ++)
+		checksum += (data[i]);
+	return checksum;
+}
+static int elan_get_iap_addr(void)
+{
+	return le_bytes_to_int(fw_data + ETP_IAP_START_ADDR * 2) * 2;
+}
+static int elan_get_fw_module_id(void)
+{
+	int start_addr = elan_get_iap_addr();
+	int unique_addr = le_bytes_to_int(fw_data + start_addr) * 2;
+	return le_bytes_to_int(fw_data + unique_addr);
+}
+static int elan_get_fw_iap_ver(void)
+{
+	return le_bytes_to_int(fw_data + ETP_IAP_VER_ADDR * 2) ;
+}
+static int elan_get_fw_flimforce_addr()
+{
+	if(iap_version<=4) {
+		int start_addr = elan_get_iap_addr();
+		return (le_bytes_to_int(fw_data + start_addr + 6) * 2);
+	}
+	else
+		return le_bytes_to_int(fw_data + ETP_IAP_FLIMFORCE_ADDR_V5 * 2) * 2;
+}
+static int elan_get_flimforce_addr()
+{
+    if(iap_version==0x3)
+    {
+    	if((module_id==0x130)||(module_id==0x133))
+    		return 0xFF40 * 2;
+    	else
+    		return -3;
+    }
+    	
+    if((ic_type==0x13)&&(iap_version>=5)) {
+	    elan_read_cmd(ETP_I2C_FLIMFORCE_ADDR_CMD);
+	    return le_bytes_to_int(rx_buf)  * 2;
+    }
+    
+    return -1;
+}
+static void elan_calc_fw_flimforce_checksum()
+{
+    fw_flimforce_area_checksum = 0;
+    for(int i = fw_flimforce_addr; i< fw_size_all; i+=2) {
+    	fw_flimforce_area_checksum += elan_calc_checksum(fw_data + i, 2);
+    }
+
+}
+static int elan_check_flimforeaddr_legal(int addrw)
+{
+   if(addrw%32==0)
+	return 0;
+   else 
+   	return -1;	
+
+}
+
+#define ETP_I2C_IAP_REG_L		0x01
+#define ETP_I2C_IAP_REG_H		0x06
+
+#define ETP_FW_IAP_PAGE_ERR		(1 << 5)
+#define ETP_FW_IAP_INTF_ERR		(1 << 4)
+
 static int check_fw_signature()
 {
 
@@ -1024,33 +1135,172 @@ static void elan_get_iap_fw_page_size(void)
 	}
 
 }
+static int elan_write_password(int pw)
+{
+    if(elan_write_cmd(ETP_I2C_PASSWORD_CMD, pw)) {
+	usleep(20 * 1000);
+	return elan_write_cmd(ETP_I2C_PASSWORD_CMD, pw);	
+    }
+    return 0;
+}
+static int elan_set_password()
+{ 
+    int pw=0;
+    if((iap_version==5)&&(ic_type==0x13))
+    	pw = ETP_I2C_IC13_IAPV5_PW & 0xFFFF;
+    else
+    	return 0;
+   
+    for(int i=0; i<3; i++) {
+    	int rv=-1;
+    	rv = elan_write_password(pw);
+    	if(rv < 0)
+    		return -1;
+			
+    	rv=-1;
+    	elan_read_cmd(ETP_I2C_PASSWORD_CMD);
+    	rv = le_bytes_to_int(rx_buf);
+		    
+    	if(rv==pw)
+    		return 0;
+    }
+    return -2;
+
+}
+static int filling_flimfore_area()
+{
+	static const uint8_t fillature[] = {0x77, 0x33, 0x44, 0xaa};
+	static const uint8_t signature[] = {0xAA, 0x55, 0xCC, 0x33, 0xFF, 0xFF};
+
+	if(fw_size_all<=0)
+		return -1;
+
+	if(fw_flimforce_addr<=0)
+		return -2;
+
+	if(flimforce_addr<=0)
+		return -3;
+
+	int size = flimforce_addr - fw_flimforce_addr;
+	if(size%64!=0)
+		return -4;
+	
+	for(int i=fw_flimforce_addr; i< flimforce_addr; i+=64)
+	{
+		for(int j=i; j< i+64; j++)
+			fw_data[j] = 0xFF;
+			
+		for(int l=0; l< sizeof(fillature); l++)
+			fw_data[l+i] = fillature[l];
+		
+		fw_data[i+4] = (flimforce_addr/2) & 0xFF;
+		fw_data[i+5] = ((flimforce_addr/2) >> 8) & 0xFF;
+		
+		for(int k=0; k< sizeof(signature); k++)
+			fw_data[i+64-6+k] = signature[k];
+			
+		uint16_t block_checksum = elan_calc_checksum(fw_data + i, 64) - 0xFFFF;
+		uint16_t filling_value = 0x10000 - (block_checksum & 0xFFFF);
+		fw_data[i+6] = filling_value & 0xFF;
+		fw_data[i+7] = (filling_value >> 8) & 0xFF;
+	}
+	return size;
+}
+static void elan_prepare_flimforce_area(void)
+{
+	fw_flimforce_addr = elan_get_fw_flimforce_addr();
+	flimforce_addr = elan_get_flimforce_addr();
+	
+	if(flimforce_addr==-3)
+		flimforce_addr = fw_flimforce_addr;
+
+	printf("ForceTBLaddr: %4x, Frombinaddr: %4x\n",
+			flimforce_addr/2, fw_flimforce_addr/2);
+				
+	if(flimforce_addr < fw_flimforce_addr)
+	{
+		switch_to_ptpmode();
+		request_exit("The Flimforce area can't filling.\n");
+	}
+	int ret = elan_check_flimforeaddr_legal(flimforce_addr/2);
+	if (ret<0)
+	{
+		switch_to_ptpmode();
+		request_exit("The Flimforce address is illegal.\n");
+	}
+	ret = elan_check_flimforeaddr_legal(fw_flimforce_addr/2);
+	if (ret<0)
+	{
+		switch_to_ptpmode();
+		request_exit("The FW Flimforce address is illegal.\n");
+	}
+	
+	int new_fw_size = flimforce_addr;
+	fw_size_all = fw_size;
+	fw_size = new_fw_size - 1;
+	fw_signature_address = new_fw_size - FW_SIGNATURE_SIZE;
+
+	elan_calc_fw_flimforce_checksum();
+	if(flimforce_addr > fw_flimforce_addr)
+	{
+		if(filling_flimfore_area()<0)
+		{
+			switch_to_ptpmode();
+			request_exit("The Flimforce area filling error.\n");
+		}
+	}
+	if(check_fw_signature()<0)
+	{
+		switch_to_ptpmode();
+		request_exit("Firmware Signatrue FAIL.\n");
+	}
+}
 static void elan_prepare_for_update(void)
 {
-	//if((elan_get_module_id()!=module_id) && (ic_type==0x13))
-	//	request_exit("Unable to support this module.\n");
-
+	fw_module_id = elan_get_fw_module_id();
+	module_id = elan_get_module_id();
+	
+	if((skip_rule==3)||(skip_rule!=4)) {
+		if(fw_module_id!=module_id) {
+			switch_to_ptpmode();
+			request_exit("The module id not match. (%x/%x)\n", fw_module_id, module_id);
+		}
+	}
+	
+	fw_iap_version = elan_get_fw_iap_ver();
+	
+	if((skip_rule==2)||(skip_rule!=4)) {
+		if(fw_iap_version!=iap_version) {
+			if(((module_id==0x133)&&(iap_version==0x3)) ||
+				((module_id==0x130)&&(iap_version==0x3)) )
+				printf("Skip match iap version.\n");
+			else {
+				switch_to_ptpmode();
+				request_exit("The iap version not match. (%x/%x)\n", fw_iap_version, iap_version);
+			}
+		}
+	}
+	
+	int ret = elan_set_password();
+	if(ret < 0)
+	{
+		switch_to_ptpmode();
+		request_exit("Unable to set Password FAIL.\n");
+	}
+	
 	if((ic_type==0x13)||(ic_type==0x12)) {
-
-		if(elan_get_flim_type_enable()==1) {
+		if(elan_get_flim_type_enable()==1) {						
 			if(iap_version<=2) {
 				switch_to_ptpmode();
 				request_exit("Unable to support this iap version.\n");
 			}
 			else if(iap_version>=3) {
-				int new_fw_size= elan_get_flim_type_addr();
-				//printf("addr = %d %x\n", new_fw_size, new_fw_size);
-				fw_size_all = fw_size;
-				fw_size = new_fw_size - 1;
-				fw_signature_address = new_fw_size - FW_SIGNATURE_SIZE;
-				if(check_fw_signature()<0)
-				{
-					switch_to_ptpmode();
-					request_exit("Firmware Signatrue FAIL.\n");
-				}
+				elan_prepare_flimforce_area();
 			}
 				
 		}
 	}
+	
 	int ctrl = elan_get_iap_ctrl();
 	if (ctrl < 0) {
 		switch_to_ptpmode();
@@ -1086,35 +1336,6 @@ static void elan_prepare_for_update(void)
 		request_exit("Got an unexpected IAP password\n");
 	}
 }
-
-/* Firmware block update */
-#define ETP_IAP_START_ADDR		0x0083
-
-static uint16_t elan_calc_checksum(uint8_t *data, int length)
-{
-	uint16_t checksum = 0;
-	int i;
-	for (i = 0; i < length; i += 2)
-		checksum += ((uint16_t)(data[i+1]) << 8) | (data[i]);
-	return checksum;
-}
-static uint16_t elan_eeprom_calc_checksum(uint8_t *data, int length)
-{
-	uint16_t checksum = 0;
-	for (int i = 0; i < length; i ++)
-		checksum += (data[i]);
-	return checksum;
-}
-static int elan_get_iap_addr(void)
-{
-	return le_bytes_to_int(fw_data + ETP_IAP_START_ADDR * 2) * 2;
-}
-
-#define ETP_I2C_IAP_REG_L		0x01
-#define ETP_I2C_IAP_REG_H		0x06
-
-#define ETP_FW_IAP_PAGE_ERR		(1 << 5)
-#define ETP_FW_IAP_INTF_ERR		(1 << 4)
 
 
 static int i2c_write_fw_block(uint8_t *raw_data, uint16_t checksum)
@@ -1593,13 +1814,10 @@ static uint16_t elan_update_firmware(void)
 		if (rv)
 			request_exit("Failed to update.");
 	}
-
+	
 	// For ic_type 0x12 0x13, claculate all checksum.
 	if(fw_size_all>0) {
-		for(i = fw_size+1; i< fw_size_all; i+= fw_section_size) {
-			block_checksum = elan_calc_checksum(fw_data + i, fw_section_size);
-			checksum += block_checksum;
-		}	
+		checksum += fw_flimforce_area_checksum;
 	}
 	return checksum;
 }
@@ -1667,6 +1885,9 @@ static int elan_eeprom_update_firmware(void)
 {
     int rv;
     int ret_prepare=elan_eeprom_prepare_for_update();
+    unsigned short check_sum=0;
+    int eeprom_fw_page_size=32;
+    
     usleep(100 * 1000);
     if(ret_prepare<0)
     {
@@ -1675,9 +1896,6 @@ static int elan_eeprom_update_firmware(void)
         	goto exit;  
     }
     
-    unsigned short check_sum=0;
-    int eeprom_fw_page_size=32;
-
     for(int i=0; i<fw_size+1; i+= eeprom_fw_page_size)
     {
 	//clear first page
@@ -1777,7 +1995,27 @@ static int get_hardware_id()
 	return id;
 
 }
+static int get_fw_checksum()
+{
+    init_elan_tp();
+    int rv = elan_get_checksum(0);
+	
+    if(rv<0)
+	printf("%d\n", rv);
+    else
+	printf("%4x\n", rv);
 
+}
+static int get_iap_checksum()
+{	
+    init_elan_tp();
+    int rv = elan_get_checksum(1);
+    if(rv<0)
+	printf("%d\n", rv);
+    else
+	printf("%4x\n", rv);
+
+}
 static int get_eeprom_checksum()
 {
     init_elan_tp();
@@ -1857,12 +2095,22 @@ int main(int argc, char *argv[])
 		printf("Version: %s.%s\n", VERSION, VERSION_SUB);
 		return 0;
 	}
-	else if(state==GET_EEPROM_CHECKSUM)
+	else if(state==GET_FW_CHECKSUM_STATE)
+	{
+		get_fw_checksum();
+		return 0;
+	}
+	else if(state==GET_IAP_CHECKSUM_STATE)
+	{
+		get_iap_checksum();
+		return 0;
+	}
+	else if(state==GET_EEPROM_CHECKSUM_STATE)
 	{
 		get_eeprom_checksum();
 		return 0;
 	}
-	else if(state==GET_EEPROM_VERSION)
+	else if(state==GET_EEPROM_VERSION_STATE)
 	{
 		get_eeprom_version();
 		return 0;
