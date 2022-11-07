@@ -33,8 +33,8 @@
 #define I2C_INTERFACE 2
 #define HID_I2C_INTERFACE 3
 
-#define VERSION "2.0"
-#define VERSION_SUB "1"
+#define VERSION "2.1"
+#define VERSION_SUB "0"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
@@ -1146,6 +1146,14 @@ static int elan_write_password(int pw)
 static int elan_set_password()
 { 
     int pw=0;
+    if(iap_version<0) {
+    	is_new_pattern = elan_get_patten();
+	iap_version = elan_get_version(1);
+    }
+    
+    if(ic_type<=0) 
+    	ic_type = elan_get_ic_type();
+    	
     if((iap_version==5)&&(ic_type==0x13))
     	pw = ETP_I2C_IC13_IAPV5_PW & 0xFFFF;
     else
@@ -1532,6 +1540,7 @@ static int elan_restart_driver_ic()
 
 static int elan_write_info_eeprom_checksum(unsigned short checksum)
 {
+	
     if(elan_write_cmd(0x0322, 0x4600)) {
 	usleep(20 * 1000);
 	if(elan_write_cmd(0x0322, 0x4600)) {
@@ -1542,7 +1551,11 @@ static int elan_write_info_eeprom_checksum(unsigned short checksum)
     int ret = le_bytes_to_int(rx_buf);
     if((ret & 0xFFFF)!=0x4600)
     	return -2;
-   
+
+    if(elan_set_password() < 0) {
+	if(elan_set_password() < 0)
+		return -6;
+    }
     if(elan_write_cmd(0x0311, 0x1EA5)) {
 	usleep(20 * 1000);
 	if(elan_write_cmd(0x0311, 0x1EA5)) 
@@ -2004,6 +2017,7 @@ static int get_fw_checksum()
 	printf("%d\n", rv);
     else
 	printf("%4x\n", rv);
+    return rv;
 
 }
 static int get_iap_checksum()
@@ -2014,6 +2028,7 @@ static int get_iap_checksum()
 	printf("%d\n", rv);
     else
 	printf("%4x\n", rv);
+    return rv;
 
 }
 static int get_eeprom_checksum()
