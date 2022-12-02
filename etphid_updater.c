@@ -34,7 +34,7 @@
 #define HID_I2C_INTERFACE 3
 
 #define VERSION "2.1"
-#define VERSION_SUB "0"
+#define VERSION_SUB "1"
 /* Command line options */
 static uint16_t vid = 0x04f3;			/* ELAN */
 static uint16_t pid = 0x30C5;			/* B50  */
@@ -71,7 +71,7 @@ static int fw_module_id = -1;
 static int fw_flimforce_addr = -1;
 static int fw_version = -1;
 static int fw_signature_address;
-
+static int region_code = -1;
 static int eeprom_driver_ic=-1;
 static int eeprom_iap_version = -1;
 
@@ -84,7 +84,7 @@ static int le_bytes_to_int(uint8_t *buf)
 
 /* Command line parsing related */
 static char *progname;
-static char *short_opts = ":b:E:v:p:i:h:gdmzwa:CGcIs:";
+static char *short_opts = ":b:E:v:p:i:h:gdmzwa:CGcIs:R:r";
 static const struct option long_opts[] = {
 	/* name    hasarg *flag val */
 	{"bin",      1,   NULL, 'b'},
@@ -101,6 +101,8 @@ static const struct option long_opts[] = {
 	{"get_iap_checksum",    0,   NULL, 'I'},
 	{"get_eeprom_checksum",    0,   NULL, 'C'},
 	{"get_eeprom_version",    0,   NULL, 'G'},
+	{"set_region_layout",   1,   NULL, 'R'},
+	{"get_region_layout",    0,   NULL, 'r'},
 	{"help",     0,   NULL, '?'},
 	{"version",    0,   NULL, 'z'},
 	{"debug",    0,   NULL, 'd'},
@@ -129,6 +131,8 @@ static void usage(int errs)
 	       "  -I,--get_iap_checksum  	Get IAP Checksum\n"
 	       "  -C,--get_eeprom_checksum  	Get EEPROM Firmware Checksum\n"
 	       "  -G,--get_eeprom_version  	Get EEPROM Firmware Version\n"
+	       "  -R,--set_region_layout  	Set Keyboard Region layout\n"
+	       "  -r,--get_region_layout  	Get Keyboard Region layout\n"
 	       "  -d,--debug              	Exercise extended read I2C over HID\n"	
 	       "  -z,--version              	Version\n"	
 	       "  -?,--help               	Show this message\n"
@@ -147,7 +151,8 @@ static void usage(int errs)
 #define GET_EEPROM_VERSION_STATE	8
 #define GET_FW_CHECKSUM_STATE		9
 #define GET_IAP_CHECKSUM_STATE		10
-
+#define SET_REGION_LAYOUT_STATE		11
+#define GET_REGION_LAYOUT_STATE		12
 static int parse_cmdline(int argc, char *argv[])
 {
 	char *e = 0;
@@ -231,6 +236,17 @@ static int parse_cmdline(int argc, char *argv[])
 			break;	
 		case 'G':
 			state = GET_EEPROM_VERSION_STATE;
+			break;
+		case 'R':
+			region_code  = (int) strtoul(optarg, &e, 10);
+			if (!*optarg || (e && *e)) {
+				printf("Invalid argument: \"%s\"\n", optarg);
+				errorcnt++;
+			}
+			state = SET_REGION_LAYOUT_STATE;
+			break;
+		case 'r':
+			state = GET_REGION_LAYOUT_STATE;
 			break;
 		case 'd':
 			extended_i2c_exercise = 1;
@@ -988,6 +1004,94 @@ static void disable_report()
 	usleep(50 * 1000);
 
 }
+#define ETP_I2C_REGION_CMD 	0x0500
+#define ETP_I2C_REGION_FR 	0x3409
+#define ETP_I2C_REGION_CZ 	0x2D09
+#define CODE_FR			01
+#define CODE_CZ			02
+
+static int elan_get_region_code ()
+{
+	int ret = elan_read_cmd(ETP_I2C_REGION_CMD);
+	if (ret) {
+		usleep(20 * 1000);
+		ret = elan_read_cmd(ETP_I2C_REGION_CMD);
+		if (ret)
+			return -4;
+	}
+	ret = le_bytes_to_int(rx_buf);
+
+	switch (ret & 0xFFFF) {
+	case ETP_I2C_REGION_FR:	//FR
+		ret = CODE_FR;
+		break;
+	case ETP_I2C_REGION_CZ:	//CZ
+		ret = CODE_CZ;
+		break;
+	case 0xFFFF:
+		ret = 0;
+		break;
+	default:
+	        printf("ret %x\n", ret);
+		ret = -5;
+		break;
+	
+	}
+	return ret;
+}
+#define ETP_I2C_FLASH_REGION 0x00A5
+static int elan_set_region_code (int region)
+{
+	int ret = 0;
+	if ((region < 0) || (region > 2))
+		return -6;
+	
+	ret = elan_write_cmd(ETP_I2C_IAP_CMD, ETP_I2C_FLASH_REGION);
+	if(ret) {
+		usleep(20 * 1000);
+		ret = elan_write_cmd(ETP_I2C_IAP_CMD, ETP_I2C_FLASH_REGION);	
+		if (ret)
+			return -7;
+    	}
+    	
+    	elan_read_cmd(ETP_I2C_IAP_CMD);
+    	ret = le_bytes_to_int(rx_buf);
+    	if ((ret & 0xFFFF) != ETP_I2C_FLASH_REGION)
+    		return -8;
+	
+	switch (region) {
+	case CODE_FR:	//FR
+		ret = elan_write_cmd(ETP_I2C_REGION_CMD, ETP_I2C_REGION_FR);
+		if(ret) {
+			usleep(50 * 1000);
+			ret = elan_write_cmd(ETP_I2C_REGION_CMD, ETP_I2C_REGION_FR);	
+			if (ret)
+				return -9;
+	    	}
+		break;
+	case CODE_CZ:	//CZ
+		ret = elan_write_cmd(ETP_I2C_REGION_CMD, ETP_I2C_REGION_CZ);
+		if(ret) {
+			usleep(50 * 1000);
+			ret = elan_write_cmd(ETP_I2C_REGION_CMD, ETP_I2C_REGION_CZ);	
+			if (ret)
+				return -9;
+	    	}
+		break;
+	default:	//Other
+		ret = elan_write_cmd(ETP_I2C_REGION_CMD, 0xFFFF);
+		if(ret) {
+			usleep(50 * 1000);
+			ret = elan_write_cmd(ETP_I2C_REGION_CMD, 0xFFFF);	
+			if (ret)
+				return -9;
+	    	}
+		break;
+	}
+	usleep(50 * 1000);
+	return ret;
+
+}
 
 /* Firmware block update */
 #define ETP_IAP_START_ADDR		0x0083
@@ -1154,7 +1258,7 @@ static int elan_set_password()
     if(ic_type<=0) 
     	ic_type = elan_get_ic_type();
     	
-    if((iap_version==5)&&(ic_type==0x13))
+    if((iap_version>=5)&&(ic_type==0x13))
     	pw = ETP_I2C_IC13_IAPV5_PW & 0xFFFF;
     else
     	return 0;
@@ -2047,6 +2151,59 @@ static int get_eeprom_checksum()
 
 }
 
+static int set_region_code()
+{
+	int ret = 0;
+	init_elan_tp();
+	
+	if (interface_type < 0) {
+		ret = -3;
+		printf("%d\n", ret);
+		return ret;
+	}
+	if (interface_type==I2C_INTERFACE)
+		interface_type=HID_I2C_INTERFACE;
+	disable_report();	
+	for (int i=0; i<3 ; i++) {
+		ret = elan_set_region_code (region_code);
+		if (ret < 0) {
+			continue;
+		}
+		
+		ret = elan_get_region_code();
+		if (ret < 0) {
+			continue;
+		}
+			
+		if (ret == region_code) {
+			switch_to_ptpmode();
+			printf("%d\n", ret);
+			return ret;
+		}
+		ret = -10;
+		usleep (10 * 1000);
+	}
+	switch_to_ptpmode();
+	printf("%d\n", ret);
+	return ret;	
+}
+static int get_region_code()
+{
+	int ret = 0;
+	init_elan_tp();
+	if (interface_type < 0) {
+		ret = -2;
+		printf("%d\n", ret);
+		return ret;
+	}
+	if (interface_type==I2C_INTERFACE)
+		interface_type=HID_I2C_INTERFACE;
+
+	ret = elan_get_region_code();
+	printf("%d\n", ret);
+	return ret;	
+}
+
 static int get_eeprom_version()
 {
     init_elan_tp();
@@ -2128,6 +2285,16 @@ int main(int argc, char *argv[])
 	else if(state==GET_EEPROM_VERSION_STATE)
 	{
 		get_eeprom_version();
+		return 0;
+	}
+	else if(state==SET_REGION_LAYOUT_STATE)
+	{
+		set_region_code();
+		return 0;
+	}
+	else if(state==GET_REGION_LAYOUT_STATE)
+	{
+		get_region_code();
 		return 0;
 	}
 
